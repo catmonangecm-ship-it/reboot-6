@@ -489,40 +489,47 @@
         const history = [];
 
         async function connectWallet() {
-            if (typeof window.ethereum !== 'undefined') {
-                try {
-                    const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
-                    userAccount = accounts[0];
-                    
-                    const chainId = await window.ethereum.request({ method: 'eth_chainId' });
-                    
-                    if (chainId !== '0x38') {
-                        alert('⚠️ Veuillez passer sur le réseau BSC avant de continuer');
-                        await switchToBSC();
-                        return;
-                    }
-                    
-                    updateNetworkDisplay(chainId);
-                    
-                    document.getElementById('walletStatus').className = 'status connected';
-                    document.getElementById('walletStatus').textContent = 'Connecté';
-                    document.getElementById('walletAddress').textContent = userAccount.substring(0, 6) + '...' + userAccount.substring(38);
-                    document.getElementById('connectBtn').textContent = 'Déconnecter';
-                    document.getElementById('connectBtn').onclick = disconnectWallet;
-                    document.getElementById('connectedContent').style.display = 'block';
-                    
-                    await updateBalances();
-                    loadCryptoList();
-                    
-                    window.ethereum.on('accountsChanged', handleAccountsChanged);
-                    window.ethereum.on('chainChanged', () => window.location.reload());
-                    
-                } catch (error) {
-                    console.error('Erreur:', error);
-                    alert('Erreur lors de la connexion à MetaMask');
+            // Vérifier à nouveau au moment du clic
+            if (typeof window.ethereum === 'undefined') {
+                alert('❌ MetaMask n\'est pas installé.\n\nInstallez-le depuis: https://metamask.io');
+                window.open('https://metamask.io/download/', '_blank');
+                return;
+            }
+            
+            try {
+                const accounts = await window.ethereum.request({ method: 'eth_requestAccounts' });
+                userAccount = accounts[0];
+                
+                const chainId = await window.ethereum.request({ method: 'eth_chainId' });
+                
+                if (chainId !== '0x38') {
+                    alert('⚠️ Veuillez passer sur le réseau BSC avant de continuer');
+                    await switchToBSC();
+                    return;
                 }
-            } else {
-                alert('MetaMask non installé. Installez-le depuis metamask.io');
+                
+                updateNetworkDisplay(chainId);
+                
+                document.getElementById('walletStatus').className = 'status connected';
+                document.getElementById('walletStatus').textContent = 'Connecté';
+                document.getElementById('walletAddress').textContent = userAccount.substring(0, 6) + '...' + userAccount.substring(38);
+                document.getElementById('connectBtn').textContent = 'Déconnecter';
+                document.getElementById('connectBtn').onclick = disconnectWallet;
+                document.getElementById('connectedContent').style.display = 'block';
+                
+                await updateBalances();
+                loadCryptoList();
+                
+                window.ethereum.on('accountsChanged', handleAccountsChanged);
+                window.ethereum.on('chainChanged', () => window.location.reload());
+                
+            } catch (error) {
+                console.error('Erreur:', error);
+                if (error.code === 4001) {
+                    alert('❌ Connexion refusée par l\'utilisateur');
+                } else {
+                    alert('❌ Erreur lors de la connexion à MetaMask: ' + error.message);
+                }
             }
         }
 
@@ -663,78 +670,137 @@
                     params: [userAccount, 'latest']
                 });
                 
-                if (parseInt(bnbBal, 16) < 1e15) {
-                    alert('❌ Pas assez de BNB pour les frais!');
+                const bnbAmount = parseInt(bnbBal, 16) / 1e18;
+                console.log('💰 Balance BNB:', bnbAmount.toFixed(4));
+                
+                if (bnbAmount < 0.002) {
+                    alert('❌ Pas assez de BNB pour les frais! Vous avez ' + bnbAmount.toFixed(4) + ' BNB\nMinimum requis: 0.002 BNB');
                     return;
                 }
                 
                 const amountWei = BigInt(Math.floor(amount * 1e18));
+                console.log('📊 Montant en Wei:', amountWei.toString());
                 
-                // 1. Approbation USDT
+                // 1. Vérifier balance USDT
+                const usdtBalanceData = '0x70a08231' + userAccount.substring(2).padStart(64, '0');
+                const usdtBalanceHex = await window.ethereum.request({
+                    method: 'eth_call',
+                    params: [{ to: USDT_ADDRESS, data: usdtBalanceData }, 'latest']
+                });
+                const usdtBalance = BigInt(usdtBalanceHex);
+                
+                if (usdtBalance < amountWei) {
+                    alert('❌ Pas assez de USDT! Vous avez ' + (Number(usdtBalance)/1e18).toFixed(2) + ' USDT');
+                    return;
+                }
+                
+                console.log('✅ Balance USDT suffisante');
+                
+                // 2. Approbation USDT
                 console.log('📝 Vérification approbation...');
                 const allowanceData = '0xdd62ed3e' + 
-                    userAccount.substring(2).padStart(64, '0') + 
-                    PANCAKE_ROUTER.substring(2).padStart(64, '0');
+                    userAccount.substring(2).toLowerCase().padStart(64, '0') + 
+                    PANCAKE_ROUTER.substring(2).toLowerCase().padStart(64, '0');
                 
                 const allowance = await window.ethereum.request({
                     method: 'eth_call',
                     params: [{ to: USDT_ADDRESS, data: allowanceData }, 'latest']
                 });
                 
+                console.log('Allowance actuelle:', BigInt(allowance).toString());
+                
                 if (BigInt(allowance) < amountWei) {
                     console.log('✍️ Approbation nécessaire...');
                     
+                    if (!confirm('Étape 1/2: Autoriser PancakeSwap à utiliser vos USDT?\n\nCette opération est nécessaire une seule fois.')) {
+                        return;
+                    }
+                    
                     const maxApproval = 'ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff';
                     const approveData = '0x095ea7b3' + 
-                        PANCAKE_ROUTER.substring(2).padStart(64, '0') + 
+                        PANCAKE_ROUTER.substring(2).toLowerCase().padStart(64, '0') + 
                         maxApproval;
                     
-                    const approveTx = await window.ethereum.request({
-                        method: 'eth_sendTransaction',
-                        params: [{
-                            from: userAccount,
-                            to: USDT_ADDRESS,
-                            data: approveData,
-                            gas: '0x186A0'
-                        }]
-                    });
-                    
-                    alert('✅ Approbation envoyée! Attendez 5-10 secondes...');
-                    await new Promise(r => setTimeout(r, 8000));
+                    try {
+                        const approveTx = await window.ethereum.request({
+                            method: 'eth_sendTransaction',
+                            params: [{
+                                from: userAccount,
+                                to: USDT_ADDRESS,
+                                data: approveData,
+                                gas: '0x186A0' // 100000
+                            }]
+                        });
+                        
+                        console.log('✅ Approbation TX:', approveTx);
+                        alert('✅ Approbation envoyée!\n\nAttendez 10 secondes que la transaction soit confirmée...');
+                        await new Promise(r => setTimeout(r, 10000));
+                    } catch (approveError) {
+                        console.error('Erreur approbation:', approveError);
+                        throw new Error('Approbation annulée ou échouée');
+                    }
                 }
                 
-                // 2. Obtenir le prix
+                // 3. Obtenir le prix avec plus de marge
                 console.log('💰 Récupération du prix...');
                 const path = [USDT_ADDRESS, crypto.address];
                 const quoteData = '0xd06ca61f' +
                     amountWei.toString(16).padStart(64, '0') +
                     '0000000000000000000000000000000000000000000000000000000000000040' +
                     '0000000000000000000000000000000000000000000000000000000000000002' +
-                    path[0].substring(2).toLowerCase().padStart(64, '0') +
-                    path[1].substring(2).toLowerCase().padStart(64, '0');
+                    USDT_ADDRESS.substring(2).toLowerCase().padStart(64, '0') +
+                    crypto.address.substring(2).toLowerCase().padStart(64, '0');
                 
-                const quoteResult = await window.ethereum.request({
-                    method: 'eth_call',
-                    params: [{ to: PANCAKE_ROUTER, data: quoteData }, 'latest']
-                });
+                let quoteResult;
+                try {
+                    quoteResult = await window.ethereum.request({
+                        method: 'eth_call',
+                        params: [{ to: PANCAKE_ROUTER, data: quoteData }, 'latest']
+                    });
+                } catch (quoteError) {
+                    console.error('Erreur quote:', quoteError);
+                    throw new Error('Impossible d\'obtenir le prix. Vérifiez que la paire existe sur PancakeSwap.');
+                }
+                
+                if (!quoteResult || quoteResult === '0x') {
+                    throw new Error('Prix non disponible pour cette paire');
+                }
                 
                 const resultHex = quoteResult.substring(2);
                 const amountOut = BigInt('0x' + resultHex.substring(192, 256));
-                const amountOutMin = BigInt(Math.floor(Number(amountOut) * (1 - slippage/100)));
+                
+                if (amountOut === 0n) {
+                    throw new Error('Prix retourné est 0 - paire non disponible');
+                }
+                
+                // Augmenter le slippage pour la sécurité
+                const safeSlippage = Math.max(slippage, 3); // Minimum 3%
+                const amountOutMin = BigInt(Math.floor(Number(amountOut) * (1 - safeSlippage/100)));
                 
                 console.log('Prix estimé:', (Number(amountOut)/1e18).toFixed(6), crypto.symbol);
+                console.log('Min avec slippage', safeSlippage + '%:', (Number(amountOutMin)/1e18).toFixed(6));
                 
-                // 3. Swap
+                if (!confirm(`Étape 2/2: Confirmer l'achat?\n\n` +
+                    `Vous payez: ${amount} USDT\n` +
+                    `Vous recevrez: ~${(Number(amountOut)/1e18).toFixed(6)} ${crypto.symbol}\n` +
+                    `Slippage: ${safeSlippage}%\n\n` +
+                    `Frais réseau estimés: ~0.0005 BNB`)) {
+                    return;
+                }
+                
+                // 4. Swap
                 console.log('🔄 Exécution du swap...');
-                const deadline = Math.floor(Date.now()/1000) + 1200;
+                const deadline = Math.floor(Date.now()/1000) + 1200; // 20 minutes
                 
-                let swapData;
-                const cryptoAddr = crypto.address.substring(2).toLowerCase().padStart(64, '0');
-                const usdtAddr = USDT_ADDRESS.substring(2).toLowerCase().padStart(64, '0');
-                const bnbAddr = WBNB_ADDRESS.substring(2).toLowerCase().padStart(64, '0');
                 const userAddr = userAccount.substring(2).toLowerCase().padStart(64, '0');
+                const usdtAddr = USDT_ADDRESS.substring(2).toLowerCase().padStart(64, '0');
+                
+                let swapData, swapFunction;
                 
                 if (crypto.address.toLowerCase() === WBNB_ADDRESS.toLowerCase()) {
+                    // Pour BNB: swapExactTokensForETH
+                    swapFunction = 'swapExactTokensForETH';
+                    const bnbAddr = WBNB_ADDRESS.substring(2).toLowerCase().padStart(64, '0');
                     swapData = '0x18cbafe5' + 
                         amountWei.toString(16).padStart(64, '0') +
                         amountOutMin.toString(16).padStart(64, '0') +
@@ -745,6 +811,9 @@
                         usdtAddr +
                         bnbAddr;
                 } else {
+                    // Pour autres tokens: swapExactTokensForTokens
+                    swapFunction = 'swapExactTokensForTokens';
+                    const cryptoAddr = crypto.address.substring(2).toLowerCase().padStart(64, '0');
                     swapData = '0x38ed1739' +
                         amountWei.toString(16).padStart(64, '0') +
                         amountOutMin.toString(16).padStart(64, '0') +
@@ -756,22 +825,13 @@
                         cryptoAddr;
                 }
                 
-                let gasLimit = '0x493E0'; // 300000 par défaut
+                console.log('Fonction:', swapFunction);
+                console.log('Data length:', swapData.length);
                 
-                try {
-                    const gasEstimate = await window.ethereum.request({
-                        method: 'eth_estimateGas',
-                        params: [{
-                            from: userAccount,
-                            to: PANCAKE_ROUTER,
-                            data: swapData,
-                            value: '0x0'
-                        }]
-                    });
-                    gasLimit = '0x' + Math.floor(parseInt(gasEstimate, 16) * 1.3).toString(16);
-                } catch (gasError) {
-                    console.log('⚠️ Estimation gas impossible, utilisation valeur par défaut');
-                }
+                // Utiliser un gas fixe plus élevé
+                const gasLimit = '0x7A120'; // 500000
+                
+                console.log('Gas limit:', gasLimit, '(' + parseInt(gasLimit, 16) + ')');
                 
                 const swapTx = await window.ethereum.request({
                     method: 'eth_sendTransaction',
@@ -783,6 +843,8 @@
                         value: '0x0'
                     }]
                 });
+                
+                console.log('✅ TX envoyée:', swapTx);
                 
                 dcaConfig.stats.totalBuys++;
                 dcaConfig.stats.totalInvested += amount;
@@ -799,33 +861,44 @@
                     date: new Date()
                 });
                 
-                alert(`✅ Succès!\n${crypto.symbol} acheté: ~${(Number(amountOut)/1e18).toFixed(6)}\nTX: ${swapTx}`);
+                alert(`✅ Transaction envoyée avec succès!\n\n` +
+                      `${crypto.symbol} acheté: ~${(Number(amountOut)/1e18).toFixed(6)}\n` +
+                      `TX: ${swapTx}\n\n` +
+                      `Voir sur BSCScan: https://bscscan.com/tx/${swapTx}`);
                 
             } catch (error) {
-                console.error('❌ Erreur:', error);
+                console.error('❌ Erreur complète:', error);
                 
                 let errorMsg = 'Erreur: ';
-                if (error.message && error.message.includes('insufficient funds')) {
-                    errorMsg += 'Fonds insuffisants (besoin de BNB pour les frais)';
-                } else if (error.message && error.message.includes('user rejected')) {
-                    errorMsg += 'Transaction annulée';
-                } else if (error.message && error.message.includes('INSUFFICIENT_OUTPUT_AMOUNT')) {
-                    errorMsg += 'Slippage trop faible, augmentez-le à 3-5%';
+                if (error.message) {
+                    if (error.message.includes('insufficient funds')) {
+                        errorMsg += 'Fonds insuffisants (BNB ou USDT)';
+                    } else if (error.message.includes('user rejected') || error.message.includes('User denied')) {
+                        errorMsg += 'Transaction annulée par l\'utilisateur';
+                    } else if (error.message.includes('INSUFFICIENT_OUTPUT_AMOUNT')) {
+                        errorMsg += 'Slippage trop faible, essayez 5%';
+                    } else if (error.message.includes('INSUFFICIENT_INPUT_AMOUNT')) {
+                        errorMsg += 'Montant trop faible';
+                    } else if (error.message.includes('Approbation')) {
+                        errorMsg += error.message;
+                    } else {
+                        errorMsg += error.message;
+                    }
                 } else if (error.code === 4001) {
-                    errorMsg += 'Transaction annulée par l\'utilisateur';
+                    errorMsg += 'Transaction annulée';
                 } else {
-                    errorMsg += error.message || 'Erreur inconnue';
+                    errorMsg += 'Erreur inconnue';
                 }
                 
                 addToHistory({
                     type: 'failed',
-                    crypto: crypto.symbol,
+                    crypto: crypto?.symbol || 'Unknown',
                     amount: amount,
                     error: errorMsg,
                     date: new Date()
                 });
                 
-                alert('❌ ' + errorMsg);
+                alert('❌ ' + errorMsg + '\n\nConsultez la console (F12) pour plus de détails.');
             }
         }
 
